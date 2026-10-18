@@ -5,13 +5,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 import dev.olympus.hermes.IntegrationTest;
 import dev.olympus.hermes.TestContainers;
 import dev.olympus.hermes.storage.StorageKeys;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.io.ByteArrayResource;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -106,7 +109,7 @@ class AudiobookApiTests extends IntegrationTest {
 		assertThat(cover.getBody()).isEqualTo(png);
 
 		JsonNode detail = http.get().uri("/api/v1/audiobooks/{id}", id).retrieve().body(JsonNode.class);
-		assertThat(detail.get("coverUrl").asString()).endsWith("/api/v1/audiobooks/" + id + "/cover");
+		assertThat(detail.get("coverUrl").asString()).contains("/api/v1/audiobooks/" + id + "/cover?v=");
 
 		ResponseEntity<JsonNode> chapter = uploadChapter(id, bytes(500), "audio/mpeg", Map.of("title", "One"));
 		UUID chapterId = UUID.fromString(chapter.getBody().get("id").asString());
@@ -120,6 +123,94 @@ class AudiobookApiTests extends IntegrationTest {
 				.isEqualTo(HttpStatus.NOT_FOUND);
 		assertThat(objectExists(StorageKeys.cover(id))).isFalse();
 		assertThat(objectExists(StorageKeys.chapter(id, chapterId))).isFalse();
+	}
+
+	@Test
+	void coverIsVersionedAndRevalidates() {
+		UUID id = createAudiobook("Cached cover", "Author");
+		putCover(id, bytes(300), "image/jpeg");
+		String coverUrl = coverUrl(id);
+		assertThat(coverUrl).matches(".*/api/v1/audiobooks/" + id + "/cover\\?v=\\d+");
+		String version = coverUrl.substring(coverUrl.indexOf("?v=") + 3);
+
+		ResponseEntity<byte[]> versioned = getCover(id, version, null);
+		assertThat(versioned.getStatusCode()).isEqualTo(HttpStatus.OK);
+		assertThat(versioned.getHeaders().getCacheControl()).isEqualTo("max-age=31536000, immutable");
+		String etag = versioned.getHeaders().getETag();
+		assertThat(etag).isEqualTo("\"" + version + "\"");
+		assertThat(versioned.getHeaders().getLastModified()).isPositive();
+
+		ResponseEntity<byte[]> unversioned = getCover(id, null, null);
+		assertThat(unversioned.getHeaders().getCacheControl()).isEqualTo("no-cache");
+		assertThat(unversioned.getHeaders().getETag()).isEqualTo(etag);
+
+		ResponseEntity<byte[]> revalidated = getCover(id, null, h -> h.setIfNoneMatch(etag));
+		assertThat(revalidated.getStatusCode()).isEqualTo(HttpStatus.NOT_MODIFIED);
+		assertThat(revalidated.getBody()).isNull();
+		assertThat(revalidated.getHeaders().getETag()).isEqualTo(etag);
+		long lastModified = versioned.getHeaders().getLastModified();
+		assertThat(getCover(id, null, h -> h.setIfModifiedSince(lastModified)).getStatusCode())
+				.isEqualTo(HttpStatus.NOT_MODIFIED);
+
+		// metadata changes do not touch the cover version
+		http.patch().uri("/api/v1/audiobooks/{id}", id).contentType(MediaType.APPLICATION_JSON)
+				.body(Map.of("narrator", "Someone")).retrieve().toBodilessEntity();
+		assertThat(coverUrl(id)).isEqualTo(coverUrl);
+
+		// replacing the cover changes the URL and the ETag
+		byte[] png = bytes(400);
+		putCover(id, png, "image/png");
+		String newUrl = coverUrl(id);
+		assertThat(newUrl).isNotEqualTo(coverUrl);
+		JsonNode summary = http.get().uri("/api/v1/audiobooks?q={q}", "Cached cover").retrieve().body(JsonNode.class)
+				.get("content").get(0);
+		assertThat(summary.get("coverUrl").asString()).isEqualTo(newUrl);
+
+		ResponseEntity<byte[]> changed = getCover(id, null, h -> h.setIfNoneMatch(etag));
+		assertThat(changed.getStatusCode()).isEqualTo(HttpStatus.OK);
+		assertThat(changed.getBody()).isEqualTo(png);
+		assertThat(changed.getHeaders().getContentType()).isEqualTo(MediaType.IMAGE_PNG);
+		assertThat(changed.getHeaders().getETag()).isNotEqualTo(etag);
+		// the old version parameter still works but is no longer immutable
+		assertThat(getCover(id, version, null).getHeaders().getCacheControl()).isEqualTo("no-cache");
+	}
+
+	@Test
+	void patchChangesOnlyTheGivenFields() {
+		ResponseEntity<JsonNode> created = http.post().uri("/api/v1/audiobooks")
+				.contentType(MediaType.APPLICATION_JSON)
+				.body(Map.of("title", "Patch me", "author", "Author", "narrator", "Reader", "language", "en",
+						"publishedYear", 2001, "description", "Text"))
+				.retrieve().toEntity(JsonNode.class);
+		UUID id = UUID.fromString(created.getBody().get("id").asString());
+
+		ResponseEntity<JsonNode> patched = http.patch().uri("/api/v1/audiobooks/{id}", id)
+				.contentType(MediaType.APPLICATION_JSON)
+				.body("{\"narrator\": \" New Reader \", \"publishedYear\": null}")
+				.retrieve().toEntity(JsonNode.class);
+		assertThat(patched.getStatusCode()).isEqualTo(HttpStatus.OK);
+		JsonNode body = patched.getBody();
+		assertThat(body.get("narrator").asString()).isEqualTo("New Reader");
+		assertThat(body.get("title").asString()).isEqualTo("Patch me");
+		assertThat(body.get("author").asString()).isEqualTo("Author");
+		assertThat(body.get("language").asString()).isEqualTo("en");
+		assertThat(body.get("publishedYear").asInt()).isEqualTo(2001);
+		assertThat(body.get("description").asString()).isEqualTo("Text");
+		assertThat(Instant.parse(body.get("updatedAt").asString()))
+				.isAfterOrEqualTo(Instant.parse(created.getBody().get("updatedAt").asString()));
+
+		ResponseEntity<JsonNode> invalid = http.patch().uri("/api/v1/audiobooks/{id}", id)
+				.contentType(MediaType.APPLICATION_JSON)
+				.body(Map.of("title", "", "language", "not a tag!"))
+				.retrieve().toEntity(JsonNode.class);
+		assertThat(invalid.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+		List<String> fields = new ArrayList<>();
+		invalid.getBody().get("errors").forEach(e -> fields.add(e.get("field").asString()));
+		assertThat(fields).containsExactlyInAnyOrder("title", "language");
+
+		assertThat(http.patch().uri("/api/v1/audiobooks/{id}", UUID.randomUUID())
+				.contentType(MediaType.APPLICATION_JSON).body(Map.of("title", "x"))
+				.retrieve().toBodilessEntity().getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
 	}
 
 	@Test
@@ -190,6 +281,24 @@ class AudiobookApiTests extends IntegrationTest {
 		return http.put().uri("/api/v1/audiobooks/{id}/cover", id)
 				.contentType(MediaType.MULTIPART_FORM_DATA).body(body.build())
 				.retrieve().toBodilessEntity();
+	}
+
+	private String coverUrl(UUID id) {
+		return http.get().uri("/api/v1/audiobooks/{id}", id).retrieve().body(JsonNode.class).get("coverUrl").asString();
+	}
+
+	private ResponseEntity<byte[]> getCover(UUID id, String version, Consumer<HttpHeaders> headers) {
+		return http.get().uri(b -> {
+			b.path("/api/v1/audiobooks/{id}/cover");
+			if (version != null) {
+				b.queryParam("v", version);
+			}
+			return b.build(id);
+		}).headers(h -> {
+			if (headers != null) {
+				headers.accept(h);
+			}
+		}).retrieve().toEntity(byte[].class);
 	}
 
 	private boolean objectExists(String key) {

@@ -22,10 +22,10 @@ class ProgressApiTests extends IntegrationTest {
 		UUID ch2 = UUID.fromString(uploadChapter(bookId, bytes(10), "audio/mpeg", Map.of("title", "2"))
 				.getBody().get("id").asString());
 
-		ResponseEntity<JsonNode> none = http.get().uri("/api/v1/audiobooks/{id}/progress", bookId)
-				.retrieve().toEntity(JsonNode.class);
-		assertThat(none.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
-		assertThat(none.getHeaders().getContentType()).isEqualTo(MediaType.APPLICATION_PROBLEM_JSON);
+		ResponseEntity<byte[]> none = http.get().uri("/api/v1/audiobooks/{id}/progress", bookId)
+				.retrieve().toEntity(byte[].class);
+		assertThat(none.getStatusCode()).isEqualTo(HttpStatus.NO_CONTENT);
+		assertThat(none.getBody()).isNull();
 
 		JsonNode first = put(bookId, ch1, 42).getBody();
 		assertThat(first.get("chapterId").asString()).isEqualTo(ch1.toString());
@@ -45,7 +45,33 @@ class ProgressApiTests extends IntegrationTest {
 		// deleting the referenced chapter cascades to the progress row
 		http.delete().uri("/api/v1/audiobooks/{id}/chapters/{c}", bookId, ch2).retrieve().toBodilessEntity();
 		assertThat(http.get().uri("/api/v1/audiobooks/{id}/progress", bookId).retrieve().toBodilessEntity()
-				.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+				.getStatusCode()).isEqualTo(HttpStatus.NO_CONTENT);
+	}
+
+	@Test
+	void unknownAudiobookIs404() {
+		ResponseEntity<JsonNode> res = http.get().uri("/api/v1/audiobooks/{id}/progress", UUID.randomUUID())
+				.retrieve().toEntity(JsonNode.class);
+		assertThat(res.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+		assertThat(res.getHeaders().getContentType()).isEqualTo(MediaType.APPLICATION_PROBLEM_JSON);
+	}
+
+	@Test
+	void positionMustNotExceedAKnownChapterDuration() {
+		UUID bookId = createAudiobook("Progress bounds", "Author");
+		UUID timed = UUID.fromString(uploadChapter(bookId, bytes(10), "audio/mpeg",
+				Map.of("title", "1", "durationSeconds", "90")).getBody().get("id").asString());
+		UUID untimed = UUID.fromString(uploadChapter(bookId, bytes(10), "audio/mpeg", Map.of("title", "2"))
+				.getBody().get("id").asString());
+
+		assertThat(put(bookId, timed, 90).getStatusCode()).isEqualTo(HttpStatus.OK);
+		ResponseEntity<JsonNode> tooFar = put(bookId, timed, 91);
+		assertThat(tooFar.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+		assertThat(tooFar.getHeaders().getContentType()).isEqualTo(MediaType.APPLICATION_PROBLEM_JSON);
+		assertThat(tooFar.getBody().get("detail").asString()).contains("91").contains("90");
+
+		// unknown duration: any non-negative position is accepted
+		assertThat(put(bookId, untimed, 100_000).getStatusCode()).isEqualTo(HttpStatus.OK);
 	}
 
 	@Test

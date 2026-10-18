@@ -43,6 +43,9 @@ public class Audiobook implements Persistable<UUID> {
 	@Column(name = "cover_content_type", length = 100)
 	private String coverContentType;
 
+	@Column(name = "cover_updated_at")
+	private Instant coverUpdatedAt;
+
 	@Column(name = "created_at", nullable = false, updatable = false)
 	private Instant createdAt;
 
@@ -78,6 +81,7 @@ public class Audiobook implements Persistable<UUID> {
 		this.coverKey = key;
 		this.coverContentType = contentType;
 		touch();
+		this.coverUpdatedAt = this.updatedAt;
 	}
 
 	public void touch() {
@@ -135,6 +139,11 @@ public class Audiobook implements Persistable<UUID> {
 
 	public String getCoverContentType() {
 		return coverContentType;
+	}
+
+	/** When the cover bytes last changed ({@code null} without a cover). */
+	public Instant getCoverUpdatedAt() {
+		return coverUpdatedAt;
 	}
 
 	public Instant getCreatedAt() {

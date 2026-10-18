@@ -20,14 +20,35 @@ Interactive docs: http://hermes.localtest.me/swagger-ui.html · OpenAPI spec: `/
 | Method & path | What |
 |---|---|
 | `GET /audiobooks?q=&page=&size=` | Search by title/author (case-insensitive), paged |
-| `POST /audiobooks` · `GET/PUT/DELETE /audiobooks/{id}` | Manage audiobooks; detail includes chapters, `coverUrl`, `totalDurationSeconds`. DELETE also removes the files |
-| `PUT /audiobooks/{id}/cover` · `GET /audiobooks/{id}/cover` | Upload (multipart `file`: jpeg/png/webp) / fetch the cover |
-| `POST /audiobooks/{id}/chapters` | Multipart `file` (mp3, m4a/m4b, aac, ogg, flac, wav) + `title`, optional `position`, `durationSeconds` |
-| `PUT/DELETE /audiobooks/{id}/chapters/{chapterId}` | Edit or remove a chapter |
+| `POST /audiobooks` | Create; 201 with `Location` |
+| `GET/PUT/PATCH/DELETE /audiobooks/{id}` | Detail includes chapters, `coverUrl`, `totalDurationSeconds`. DELETE (204) also removes the files |
+| `PUT /audiobooks/{id}/cover` · `GET /audiobooks/{id}/cover` | Upload (multipart `file`: jpeg/png/webp; 204) / fetch the cover |
+| `POST /audiobooks/{id}/chapters` | Multipart `file` (mp3, m4a/m4b, aac, ogg, flac, wav) + `title`, optional `position`, `durationSeconds`; 201 with `Location` |
+| `PUT/PATCH/DELETE /audiobooks/{id}/chapters/{chapterId}` | Edit or remove a chapter |
 | `GET/HEAD /audiobooks/{id}/chapters/{chapterId}/audio` | Stream the audio. Honours `Range` (206 / 416), so players can seek |
-| `GET/PUT /audiobooks/{id}/progress` | Listening position `{chapterId, positionSeconds}` (single user until auth is added) |
+| `GET/PUT /audiobooks/{id}/progress` | Listening position `{chapterId, positionSeconds}` (single user until auth is added). GET is 204 until something is saved |
 
-Errors are RFC 9457 `application/problem+json`. Health: `/actuator/health/liveness`, `/actuator/health/readiness` (db + s3).
+**Updates.** `PUT` replaces: optional audiobook fields left out (or null) are cleared. `PATCH` changes only the
+fields present and non-null, so it is what a client should use to edit single fields (it cannot clear a field; use
+`PUT` for that). Exception: a chapter `PUT` without `durationSeconds` keeps the stored duration, because the duration
+describes the audio file rather than editable metadata.
+
+**Validation.** `positionSeconds` must be `>= 0` and, when the chapter's `durationSeconds` is known, not larger than
+it (400 otherwise). Duplicate chapter positions are 409.
+
+**HTTP caching.** Chapter audio and covers send `ETag` and `Last-Modified` and answer `If-None-Match` /
+`If-Modified-Since` with 304. Audio also honours `If-Range` (a range request for a changed object gets the full body).
+- Audio: `Cache-Control: max-age=31536000, immutable`. A chapter's bytes never change under its URL (uploading again
+  creates a new chapter id).
+- Covers: `coverUrl` carries the cover version (`.../cover?v=<epoch millis of the last cover upload>`), so it changes
+  whenever the cover is replaced and URL-keyed image caches (Coil, Glide) load the new image. With the current `v` the
+  response is `max-age=31536000, immutable`; without it, or with an old one, it is `no-cache` (revalidated via ETag).
+
+**Status codes** are documented per operation in the OpenAPI spec, so generated clients (e.g. Retrofit/Kotlin) know
+them: 200, 201 + `Location`, 204, 206, 304, 400, 404, 409, 413, 415, 416, 502. Every operation has a stable
+`operationId`. Errors are RFC 9457 `application/problem+json` (`ProblemDetail` schema; validation errors add
+`errors: [{field, message}]`, unsupported uploads add `supported`). Health: `/actuator/health/liveness`,
+`/actuator/health/readiness` (db + s3).
 
 **Storage:** metadata in PostgreSQL (database `hermes`, Flyway migrations in `src/main/resources/db/migration`),
 files in S3 (RustFS bucket `hermes-audio`, keys `audiobooks/{id}/cover` and `audiobooks/{id}/chapters/{chapterId}`).

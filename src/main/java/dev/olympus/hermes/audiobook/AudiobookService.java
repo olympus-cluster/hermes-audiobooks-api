@@ -1,6 +1,7 @@
 package dev.olympus.hermes.audiobook;
 
 import dev.olympus.hermes.audiobook.AudiobookDtos.AudiobookDetail;
+import dev.olympus.hermes.audiobook.AudiobookDtos.AudiobookPatch;
 import dev.olympus.hermes.audiobook.AudiobookDtos.AudiobookRequest;
 import dev.olympus.hermes.audiobook.AudiobookDtos.AudiobookSummary;
 import dev.olympus.hermes.audiobook.AudiobookDtos.PageResponse;
@@ -11,10 +12,12 @@ import dev.olympus.hermes.error.BadRequestException;
 import dev.olympus.hermes.error.NotFoundException;
 import dev.olympus.hermes.storage.MediaTypes;
 import dev.olympus.hermes.storage.ObjectStorage;
+import dev.olympus.hermes.storage.ObjectVersion;
 import dev.olympus.hermes.storage.StorageKeys;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -64,11 +67,26 @@ public class AudiobookService {
 		return detail(book, chapters.findByAudiobookIdOrderByPositionAsc(id).stream().map(ChapterResponse::of).toList());
 	}
 
+	/** PUT: full replacement; optional fields missing from the request are cleared. */
 	@Transactional
 	public AudiobookDetail update(UUID id, AudiobookRequest req) {
 		Audiobook book = require(id);
 		book.update(req.title().strip(), req.author().strip(), trim(req.narrator()), req.description(),
 				trim(req.language()), req.publishedYear());
+		return detail(book, chapters.findByAudiobookIdOrderByPositionAsc(id).stream().map(ChapterResponse::of).toList());
+	}
+
+	/** PATCH: only non-null fields are applied; the others keep their stored value. */
+	@Transactional
+	public AudiobookDetail patch(UUID id, AudiobookPatch req) {
+		Audiobook book = require(id);
+		book.update(
+				req.title() != null ? req.title().strip() : book.getTitle(),
+				req.author() != null ? req.author().strip() : book.getAuthor(),
+				req.narrator() != null ? trim(req.narrator()) : book.getNarrator(),
+				req.description() != null ? req.description() : book.getDescription(),
+				req.language() != null ? trim(req.language()) : book.getLanguage(),
+				req.publishedYear() != null ? req.publishedYear() : book.getPublishedYear());
 		return detail(book, chapters.findByAudiobookIdOrderByPositionAsc(id).stream().map(ChapterResponse::of).toList());
 	}
 
@@ -103,7 +121,8 @@ public class AudiobookService {
 		tx.executeWithoutResult(status -> require(id).setCover(key, contentType));
 	}
 
-	public record CoverObject(String key, String contentType) {
+	/** {@code version.tag()} is also the {@code v} query parameter of the cover URL. */
+	public record CoverObject(String key, String contentType, ObjectVersion version) {
 	}
 
 	@Transactional(readOnly = true)
@@ -112,7 +131,7 @@ public class AudiobookService {
 		if (book.getCoverKey() == null) {
 			throw new NotFoundException("Audiobook " + id + " has no cover");
 		}
-		return new CoverObject(book.getCoverKey(), book.getCoverContentType());
+		return new CoverObject(book.getCoverKey(), book.getCoverContentType(), coverVersion(book));
 	}
 
 	private Audiobook require(UUID id) {
@@ -134,8 +153,13 @@ public class AudiobookService {
 		return stripped.isEmpty() ? null : stripped;
 	}
 
+	private static ObjectVersion coverVersion(Audiobook b) {
+		Instant changed = b.getCoverUpdatedAt() != null ? b.getCoverUpdatedAt() : b.getUpdatedAt();
+		return new ObjectVersion(Long.toString(changed.toEpochMilli()), changed);
+	}
+
 	private static String coverUrl(Audiobook b) {
-		return b.getCoverKey() == null ? null : ApiLinks.cover(b.getId());
+		return b.getCoverKey() == null ? null : ApiLinks.cover(b.getId(), coverVersion(b).tag());
 	}
 
 	private static AudiobookSummary summary(Audiobook b) {

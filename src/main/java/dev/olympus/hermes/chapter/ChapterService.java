@@ -6,6 +6,7 @@ import dev.olympus.hermes.error.ConflictException;
 import dev.olympus.hermes.error.NotFoundException;
 import dev.olympus.hermes.storage.MediaTypes;
 import dev.olympus.hermes.storage.ObjectStorage;
+import dev.olympus.hermes.storage.ObjectVersion;
 import dev.olympus.hermes.storage.StorageKeys;
 import java.io.IOException;
 import java.io.InputStream;
@@ -70,14 +71,30 @@ public class ChapterService {
 		}
 	}
 
+	/** PUT: title and position are replaced; an omitted durationSeconds keeps the stored duration. */
 	@Transactional
 	public ChapterResponse update(UUID audiobookId, UUID chapterId, ChapterUpdateRequest req) {
 		Chapter chapter = require(audiobookId, chapterId);
-		if (chapter.getPosition() != req.position()
-				&& chapters.existsByAudiobookIdAndPositionAndIdNot(audiobookId, req.position(), chapterId)) {
-			throw positionTaken(req.position());
+		return apply(chapter, req.title().strip(), req.position(),
+				req.durationSeconds() != null ? req.durationSeconds() : chapter.getDurationSeconds());
+	}
+
+	/** PATCH: only the fields present (non-null) in the request change. */
+	@Transactional
+	public ChapterResponse patch(UUID audiobookId, UUID chapterId, ChapterPatchRequest req) {
+		Chapter chapter = require(audiobookId, chapterId);
+		return apply(chapter,
+				req.title() != null ? req.title().strip() : chapter.getTitle(),
+				req.position() != null ? req.position() : chapter.getPosition(),
+				req.durationSeconds() != null ? req.durationSeconds() : chapter.getDurationSeconds());
+	}
+
+	private ChapterResponse apply(Chapter chapter, String title, int position, Integer durationSeconds) {
+		if (chapter.getPosition() != position
+				&& chapters.existsByAudiobookIdAndPositionAndIdNot(chapter.getAudiobookId(), position, chapter.getId())) {
+			throw positionTaken(position);
 		}
-		chapter.update(req.title().strip(), req.position(), req.durationSeconds());
+		chapter.update(title, position, durationSeconds);
 		return ChapterResponse.of(chapters.saveAndFlush(chapter));
 	}
 
@@ -90,14 +107,18 @@ public class ChapterService {
 		storage.deleteQuietly(key);
 	}
 
-	/** What the streaming endpoint needs to proxy the audio object. */
-	public record AudioObject(String key, String contentType, long sizeBytes) {
+	/**
+	 * What the streaming endpoint needs to proxy the audio object. A chapter's audio is never replaced (a new upload
+	 * is a new chapter), so the chapter id and creation time identify its bytes.
+	 */
+	public record AudioObject(String key, String contentType, long sizeBytes, ObjectVersion version) {
 	}
 
 	@Transactional(readOnly = true)
 	public AudioObject audio(UUID audiobookId, UUID chapterId) {
 		Chapter c = require(audiobookId, chapterId);
-		return new AudioObject(c.getAudioKey(), c.getContentType(), c.getSizeBytes());
+		return new AudioObject(c.getAudioKey(), c.getContentType(), c.getSizeBytes(),
+				new ObjectVersion(c.getId().toString(), c.getCreatedAt()));
 	}
 
 	private Chapter require(UUID audiobookId, UUID chapterId) {

@@ -8,6 +8,7 @@ import dev.olympus.hermes.storage.StorageKeys;
 import java.util.Arrays;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Consumer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -106,6 +107,96 @@ class ChapterApiTests extends IntegrationTest {
 	}
 
 	@Test
+	void audioCarriesValidatorsAndCacheControl() {
+		ResponseEntity<byte[]> full = audio(null);
+		assertThat(full.getHeaders().getETag()).isEqualTo("\"" + chapterId + "\"");
+		assertThat(full.getHeaders().getLastModified()).isPositive();
+		assertThat(full.getHeaders().getCacheControl()).isEqualTo("max-age=31536000, immutable");
+
+		ResponseEntity<byte[]> partial = audio("bytes=0-9");
+		assertThat(partial.getHeaders().getETag()).isEqualTo(full.getHeaders().getETag());
+		assertThat(partial.getHeaders().getLastModified()).isEqualTo(full.getHeaders().getLastModified());
+		assertThat(partial.getHeaders().getCacheControl()).isEqualTo("max-age=31536000, immutable");
+	}
+
+	@Test
+	void revalidationWithIfNoneMatchOrIfModifiedSinceIs304() {
+		ResponseEntity<byte[]> full = audio(null);
+		String etag = full.getHeaders().getETag();
+		long lastModified = full.getHeaders().getLastModified();
+
+		ResponseEntity<byte[]> byEtag = audioWith(h -> h.setIfNoneMatch(etag));
+		assertThat(byEtag.getStatusCode()).isEqualTo(HttpStatus.NOT_MODIFIED);
+		assertThat(byEtag.getBody()).isNull();
+		assertThat(byEtag.getHeaders().getETag()).isEqualTo(etag);
+		assertThat(byEtag.getHeaders().getCacheControl()).isEqualTo("max-age=31536000, immutable");
+
+		// weak comparison, lists and * all match; a Range does not matter when the copy is current
+		assertThat(audioWith(h -> h.set(HttpHeaders.IF_NONE_MATCH, "\"other\", W/" + etag)).getStatusCode())
+				.isEqualTo(HttpStatus.NOT_MODIFIED);
+		assertThat(audioWith(h -> h.set(HttpHeaders.IF_NONE_MATCH, "*")).getStatusCode())
+				.isEqualTo(HttpStatus.NOT_MODIFIED);
+		assertThat(audioWith(h -> {
+			h.setIfNoneMatch(etag);
+			h.set(HttpHeaders.RANGE, "bytes=0-9");
+		}).getStatusCode()).isEqualTo(HttpStatus.NOT_MODIFIED);
+
+		ResponseEntity<byte[]> otherEtag = audioWith(h -> h.setIfNoneMatch("\"stale\""));
+		assertThat(otherEtag.getStatusCode()).isEqualTo(HttpStatus.OK);
+		assertThat(otherEtag.getBody()).isEqualTo(audio);
+
+		assertThat(audioWith(h -> h.setIfModifiedSince(lastModified)).getStatusCode()).isEqualTo(HttpStatus.NOT_MODIFIED);
+		assertThat(audioWith(h -> h.setIfModifiedSince(lastModified - 1000)).getStatusCode()).isEqualTo(HttpStatus.OK);
+		// If-None-Match wins over If-Modified-Since
+		assertThat(audioWith(h -> {
+			h.setIfNoneMatch("\"stale\"");
+			h.setIfModifiedSince(lastModified);
+		}).getStatusCode()).isEqualTo(HttpStatus.OK);
+
+		ResponseEntity<Void> head = http.head()
+				.uri("/api/v1/audiobooks/{id}/chapters/{c}/audio", bookId, chapterId)
+				.header(HttpHeaders.IF_NONE_MATCH, etag)
+				.retrieve().toBodilessEntity();
+		assertThat(head.getStatusCode()).isEqualTo(HttpStatus.NOT_MODIFIED);
+	}
+
+	@Test
+	void ifRangeServesTheRangeOnlyForTheCurrentVersion() {
+		ResponseEntity<byte[]> full = audio(null);
+		String etag = full.getHeaders().getETag();
+		String lastModified = full.getHeaders().getFirst(HttpHeaders.LAST_MODIFIED);
+
+		ResponseEntity<byte[]> sameEtag = audioWith(h -> {
+			h.set(HttpHeaders.RANGE, "bytes=10-19");
+			h.set(HttpHeaders.IF_RANGE, etag);
+		});
+		assertThat(sameEtag.getStatusCode()).isEqualTo(HttpStatus.PARTIAL_CONTENT);
+		assertThat(sameEtag.getBody()).isEqualTo(Arrays.copyOfRange(audio, 10, 20));
+
+		ResponseEntity<byte[]> sameDate = audioWith(h -> {
+			h.set(HttpHeaders.RANGE, "bytes=10-19");
+			h.set(HttpHeaders.IF_RANGE, lastModified);
+		});
+		assertThat(sameDate.getStatusCode()).isEqualTo(HttpStatus.PARTIAL_CONTENT);
+
+		for (String stale : new String[] { "\"stale\"", "W/" + etag, "Thu, 01 Jan 1970 00:00:00 GMT", "garbage" }) {
+			ResponseEntity<byte[]> res = audioWith(h -> {
+				h.set(HttpHeaders.RANGE, "bytes=10-19");
+				h.set(HttpHeaders.IF_RANGE, stale);
+			});
+			assertThat(res.getStatusCode()).as(stale).isEqualTo(HttpStatus.OK);
+			assertThat(res.getBody()).as(stale).isEqualTo(audio);
+		}
+
+		// a stale If-Range also means an unsatisfiable Range is ignored rather than answered with 416
+		ResponseEntity<byte[]> ignored = audioWith(h -> {
+			h.set(HttpHeaders.RANGE, "bytes=5000-");
+			h.set(HttpHeaders.IF_RANGE, "\"stale\"");
+		});
+		assertThat(ignored.getStatusCode()).isEqualTo(HttpStatus.OK);
+	}
+
+	@Test
 	void unsatisfiableRangeIs416() {
 		ResponseEntity<byte[]> res = audio("bytes=5000-");
 		assertThat(res.getStatusCode()).isEqualTo(HttpStatus.REQUESTED_RANGE_NOT_SATISFIABLE);
@@ -125,6 +216,47 @@ class ChapterApiTests extends IntegrationTest {
 		assertThat(head.getHeaders().getFirst(HttpHeaders.CONTENT_RANGE)).isEqualTo("bytes 0-99/" + SIZE);
 		assertThat(head.getHeaders().getContentLength()).isEqualTo(100);
 		assertThat(head.getHeaders().getFirst(HttpHeaders.ACCEPT_RANGES)).isEqualTo("bytes");
+	}
+
+	@Test
+	void putWithoutDurationKeepsTheStoredDuration() {
+		ResponseEntity<JsonNode> updated = http.put()
+				.uri("/api/v1/audiobooks/{id}/chapters/{c}", bookId, chapterId)
+				.contentType(MediaType.APPLICATION_JSON)
+				.body(Map.of("title", "Renamed", "position", 1))
+				.retrieve().toEntity(JsonNode.class);
+		assertThat(updated.getStatusCode()).isEqualTo(HttpStatus.OK);
+		assertThat(updated.getBody().get("title").asString()).isEqualTo("Renamed");
+		assertThat(updated.getBody().get("durationSeconds").asInt()).isEqualTo(125);
+
+		JsonNode detail = http.get().uri("/api/v1/audiobooks/{id}", bookId).retrieve().body(JsonNode.class);
+		assertThat(detail.get("totalDurationSeconds").asLong()).isEqualTo(125);
+	}
+
+	@Test
+	void patchChangesOnlyTheGivenFields() {
+		ResponseEntity<JsonNode> renamed = patch(Map.of("title", "  Prologue "));
+		assertThat(renamed.getStatusCode()).isEqualTo(HttpStatus.OK);
+		assertThat(renamed.getBody().get("title").asString()).isEqualTo("Prologue");
+		assertThat(renamed.getBody().get("position").asInt()).isEqualTo(1);
+		assertThat(renamed.getBody().get("durationSeconds").asInt()).isEqualTo(125);
+
+		ResponseEntity<JsonNode> moved = patch(Map.of("position", 5, "durationSeconds", 130));
+		assertThat(moved.getBody().get("title").asString()).isEqualTo("Prologue");
+		assertThat(moved.getBody().get("position").asInt()).isEqualTo(5);
+		assertThat(moved.getBody().get("durationSeconds").asInt()).isEqualTo(130);
+
+		uploadChapter(bookId, bytes(10), "audio/mpeg", Map.of("title", "Other", "position", "2"));
+		assertThat(patch(Map.of("position", 2)).getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+
+		ResponseEntity<JsonNode> blank = patch(Map.of("title", " "));
+		assertThat(blank.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+		assertThat(blank.getBody().get("errors").get(0).get("field").asString()).isEqualTo("title");
+		assertThat(patch(Map.of("position", 0)).getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+
+		assertThat(http.patch().uri("/api/v1/audiobooks/{id}/chapters/{c}", bookId, UUID.randomUUID())
+				.contentType(MediaType.APPLICATION_JSON).body(Map.of("title", "x"))
+				.retrieve().toBodilessEntity().getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
 	}
 
 	@Test
@@ -185,13 +317,23 @@ class ChapterApiTests extends IntegrationTest {
 	}
 
 	private ResponseEntity<byte[]> audio(String range) {
+		return audioWith(h -> {
+			if (range != null) {
+				h.set(HttpHeaders.RANGE, range);
+			}
+		});
+	}
+
+	private ResponseEntity<byte[]> audioWith(Consumer<HttpHeaders> headers) {
 		return http.get().uri("/api/v1/audiobooks/{id}/chapters/{c}/audio", bookId, chapterId)
-				.headers(h -> {
-					if (range != null) {
-						h.set(HttpHeaders.RANGE, range);
-					}
-				})
+				.headers(headers)
 				.retrieve().toEntity(byte[].class);
+	}
+
+	private ResponseEntity<JsonNode> patch(Map<String, Object> body) {
+		return http.patch().uri("/api/v1/audiobooks/{id}/chapters/{c}", bookId, chapterId)
+				.contentType(MediaType.APPLICATION_JSON).body(body)
+				.retrieve().toEntity(JsonNode.class);
 	}
 
 	private boolean objectExists(String key) {
