@@ -1,0 +1,18 @@
+# secrets
+.env
+*.local.yaml
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# build output
+target/
+build/
+dist/
+node_modules/
+__pycache__/
+.venv/
+.pytest_cache/
+.angular/

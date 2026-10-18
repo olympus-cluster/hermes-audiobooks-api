@@ -1,0 +1,15 @@
+.git
+.github
+.idea
+.vscode
+k8s
+Tiltfile
+*.md
+.env
+target
+build
+dist
+node_modules
+__pycache__
+.venv
+.angular

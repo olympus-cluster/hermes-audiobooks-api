@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hermes-audiobooks-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hermes-audiobooks-api
+  template:
+    metadata:
+      labels:
+        app: hermes-audiobooks-api
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: app
+          image: hermes-audiobooks-api
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: hermes-audiobooks-api-config
+            - secretRef:
+                name: hermes-audiobooks-api        # DB + S3 settings, from platform/scripts/secrets.ps1
+          lifecycle:
+            preStop:
+              sleep: { seconds: 5 }   # let Traefik stop routing here before the app shuts down (no 502 on rollout)
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 768Mi }
+          startupProbe:              # gives slow starters (JVM) up to 150s before liveness kicks in
+            httpGet: { path: /actuator/health/liveness, port: http }
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: http }
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: http }
+            periodSeconds: 5
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp          # Tomcat stages multipart uploads here before they stream to S3
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 2Gi             # room for the largest upload (HERMES_MAX_UPLOAD, default 1GB)

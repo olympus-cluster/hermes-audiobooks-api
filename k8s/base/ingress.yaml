@@ -1,0 +1,24 @@
+# http://hermes.localtest.me from the PC; the nip.io host is for the Android emulator
+# (the emulator reaches the PC at 10.0.2.2). Delete that rule for web-only apps.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    traefik.ingress.kubernetes.io/router.middlewares: apps-retry@kubernetescrd   # from platform/cluster/apps-middlewares.yaml
+  name: hermes-audiobooks-api
+spec:
+  rules:
+    - host: hermes.localtest.me
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: { name: hermes-audiobooks-api, port: { name: http } }
+    - host: hermes.10.0.2.2.nip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: { name: hermes-audiobooks-api, port: { name: http } }

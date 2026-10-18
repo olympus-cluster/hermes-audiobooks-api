@@ -1,0 +1,8 @@
+# Non-secret settings, exposed to the app as environment variables.
+# Secrets (DB/S3 passwords) come from Secret "hermes-audiobooks-api", created by platform/scripts/secrets.ps1.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hermes-audiobooks-api-config
+data:
+  TZ: Europe/Athens

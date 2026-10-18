@@ -1,0 +1,11 @@
+# Local olympus cluster: image from the local registry (localhost:5001).
+# Manual deploy:  docker build -t localhost:5001/hermes-audiobooks-api:dev . ; docker push localhost:5001/hermes-audiobooks-api:dev
+#                 kubectl apply -k k8s/overlays/local ; kubectl -n apps rollout restart deploy/hermes-audiobooks-api
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+images:
+  - name: hermes-audiobooks-api
+    newName: localhost:5001/hermes-audiobooks-api
+    newTag: dev

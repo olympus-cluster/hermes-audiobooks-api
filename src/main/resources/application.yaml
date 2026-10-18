@@ -1,0 +1,57 @@
+spring:
+  application:
+    name: hermes-audiobooks-api
+  threads:
+    virtual:
+      enabled: true
+  # datasource: SPRING_DATASOURCE_URL / _USERNAME / _PASSWORD are bound directly from the environment
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+  flyway:
+    enabled: true
+  servlet:
+    multipart:
+      enabled: true
+      max-file-size: ${HERMES_MAX_UPLOAD:1GB}
+      max-request-size: ${HERMES_MAX_UPLOAD:1GB}
+      # parts are spooled to the temp dir by Tomcat, never held in heap
+      file-size-threshold: 0
+  mvc:
+    async:
+      # audio streams run asynchronously (StreamingResponseBody); allow long listens/downloads
+      request-timeout: ${HERMES_STREAM_TIMEOUT:6h}
+
+server:
+  shutdown: graceful
+  forward-headers-strategy: native
+
+hermes:
+  s3:
+    endpoint: ${S3_ENDPOINT:}
+    region: ${S3_REGION:us-east-1}
+    bucket: ${S3_BUCKET:hermes-audio}
+    access-key: ${S3_ACCESS_KEY:}
+    secret-key: ${S3_SECRET_KEY:}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      group:
+        readiness:
+          include: readinessState,db,s3
+
+springdoc:
+  api-docs:
+    enabled: ${HERMES_API_DOCS_ENABLED:true}
+    path: /v3/api-docs
+  swagger-ui:
+    enabled: ${HERMES_API_DOCS_ENABLED:true}
+    path: /swagger-ui.html
